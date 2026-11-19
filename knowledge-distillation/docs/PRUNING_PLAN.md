@@ -1,141 +1,141 @@
-# Pruning 模型压缩方案与实施计划
+# Pruning: Model Compression Approach and Implementation Plan
 
-基于当前 KD 项目（ResNet-34 / MobileNetV2，CIFAR / TinyImageNet），下面是剪枝方法推荐与分阶段实施计划。
+Based on the current KD project (ResNet-34 / MobileNetV2, CIFAR / TinyImageNet), this document recommends pruning methods and lays out a phased implementation plan.
 
 ---
 
-## 一、剪枝方法推荐
+## 1. Recommended Pruning Methods
 
-### 1. 按剪枝粒度
+### 1.1 By Pruning Granularity
 
-| 类型 | 说明 | 推荐度 | 备注 |
+| Type | Description | Priority | Notes |
 |------|------|--------|------|
-| **结构化剪枝** (Structured) | 按通道/卷积核整块移除 | ⭐⭐⭐ 优先 | 实际推理加速明显，易部署 |
-| **非结构化剪枝** (Unstructured) | 逐权重置零 | ⭐⭐ | 需稀疏内核/库才有加速，适合研究 |
+| **Structured pruning** | Removes whole channels / filters | ⭐⭐⭐ Preferred | Gives real inference speedups; easy to deploy |
+| **Unstructured pruning** | Zeroes out individual weights | ⭐⭐ | Only speeds up with sparse kernels/libraries; better suited to research |
 
-**建议**：以**结构化剪枝**为主（channel/filter pruning），方便和你现有的 CNN 对接，且在 CPU/GPU 上都能拿到真实加速。
+**Recommendation**: focus on **structured pruning** (channel/filter pruning). It fits the existing CNNs well and yields real speedups on both CPU and GPU.
 
-### 2. 具体方法推荐
+### 1.2 Specific Methods
 
-| 方法 | 库/实现 | 适合场景 | 与 KD 结合 |
+| Method | Library / Implementation | Best For | Combining with KD |
 |------|---------|----------|------------|
-| **L1-norm channel pruning** | `torch-pruning` | 通用、稳定 | 对 teacher 或 student 剪枝后蒸馏 |
-| **BN scaling / filter importance** | 自实现 或 `torch-pruning` |  ResNet / MobileNet | 用 BN γ 做重要性，再剪通道 |
-| **Gradual magnitude pruning** | `torch.nn.utils.prune` | 快速验证 | 非结构化，先跑通流程 |
-| **OBS / OBD** | 自实现 或 专用库 | 进阶、二阶信息 | 精度略好，实现复杂 |
+| **L1-norm channel pruning** | `torch-pruning` | General-purpose, stable | Prune the teacher or student, then distill |
+| **BN scaling / filter importance** | Custom or `torch-pruning` | ResNet / MobileNet | Use BN γ as importance, then prune channels |
+| **Gradual magnitude pruning** | `torch.nn.utils.prune` | Quick validation | Unstructured; good for getting the pipeline working first |
+| **OBS / OBD** | Custom or dedicated library | Advanced, second-order information | Slightly better accuracy, complex to implement |
 
-**首选**：**L1-norm channel pruning**（如 `torch-pruning`）+ **gradual pruning**（训练过程中逐步提高稀疏度），实现简单、可复现、易和你现有 `train_teacher` / `train_student` 对接。
+**First choice**: **L1-norm channel pruning** (e.g. `torch-pruning`) + **gradual pruning** (increasing sparsity step by step during training). Simple to implement, reproducible, and easy to plug into the existing `train_teacher` / `train_student` scripts.
 
-### 3. 库推荐
+### 1.3 Recommended Libraries
 
-- **[torch-pruning](https://github.com/VainF/Torch-Pruning)**（推荐）
-  - 结构化剪枝、依赖感知、支持 ResNet / MobileNet 等
-  - API 清晰，便于写 `prune_model(model, example_input, amount=0.3)` 这类封装
-- **PyTorch 内置** `torch.nn.utils.prune`
-  - 适合先做 **unstructured** 小实验（如 `l1_unstructured`）
-  - 无需新依赖，验证「训练 + 剪枝 + 评估」管线
-- **nncf**（Intel）
-  - 若需要 quantization + pruning 一体化、部署到 Intel 硬件时再考虑
+- **[torch-pruning](https://github.com/VainF/Torch-Pruning)** (recommended)
+  - Structured, dependency-aware pruning; supports ResNet, MobileNet, etc.
+  - Clean API, easy to wrap as something like `prune_model(model, example_input, amount=0.3)`
+- **PyTorch built-in** `torch.nn.utils.prune`
+  - Good for small **unstructured** experiments first (e.g. `l1_unstructured`)
+  - No new dependency; validates the "train + prune + evaluate" pipeline
+- **nncf** (Intel)
+  - Consider later if combined quantization + pruning or deployment on Intel hardware is needed
 
 ---
 
-## 二、与 KD 的结合方式
+## 2. Combining Pruning with KD
 
-三种典型用法，按实现难度排序：
+Three typical approaches, ordered by implementation difficulty:
 
 1. **Prune-then-Distill**
-   - 先训练 teacher → 对 teacher 做结构化剪枝 → 用剪枝后的 teacher 蒸馏 student。
-   - 优点：实现最简单，只改 teacher 导出与 student 的 teacher 加载。
-   - 适合：验证「小 teacher + KD」是否比「大 teacher + KD」更高效。
+   - Train the teacher → apply structured pruning to the teacher → distill the student from the pruned teacher.
+   - Pros: simplest to implement; only the teacher export and the student's teacher loading need to change.
+   - Use case: test whether "small teacher + KD" is more efficient than "large teacher + KD".
 
 2. **Distill-then-Prune**
-   - 先正常 KD 训练 student → 再对 student 做剪枝（可加若干 epoch 微调）。
-   - 优点：不碰 teacher，只压缩 student，和现有 `train_student` 流程接近。
-   - 适合：目标是把 **student 压到更小、更快**。
+   - Train the student with standard KD → then prune the student (optionally fine-tune for a few epochs).
+   - Pros: the teacher is untouched; only the student is compressed, close to the existing `train_student` flow.
+   - Use case: the goal is to make the **student smaller and faster**.
 
-3. **Prune + Distill 联合**
-   - 在 student 训练过程中同时做渐进式剪枝（例如每 N 个 epoch 提高一点剪枝率）。
-   - 优点：压缩与蒸馏一步完成，有机会更好平衡精度与大小。
-   - 适合：作为进阶阶段，在 1、2 跑通后再做。
+3. **Joint Prune + Distill**
+   - Apply progressive pruning while training the student (e.g. raise the pruning ratio slightly every N epochs).
+   - Pros: compression and distillation happen in one step, with a better chance of balancing accuracy and size.
+   - Use case: an advanced stage, after 1 and 2 are working.
 
-建议实施顺序：**先 2（Distill-then-Prune），再 1（Prune-then-Distill），最后 3（联合）**。
-
----
-
-## 三、分阶段实施计划
-
-### Phase 1：环境与最小验证（约 1–2 天）
-
-- [x] **1.1** 安装依赖  
-  - `pip install torch-pruning thop`（可选，用于结构化剪枝与 FLOPs）；  
-  - 仅用 `torch.nn.utils.prune` 也可完成 Phase 1。
-- [x] **1.2** 写一个 **standalone 剪枝脚本**（如 `src/prune_utils.py`）：
-  - 加载已有 `checkpoints`（teacher 或 student）；
-  - 对 `nn.Linear` / `nn.Conv2d` 做 **L1 unstructured** 剪枝（例如 30%），用 `torch.nn.utils.prune`；
-  - 保存剪枝后模型，并跑 `evaluate` 逻辑看精度变化。
-- [x] **1.3** 在 CIFAR-10 上跑通：**正常 KD student → 剪枝 student → 评估**，确认流程没问题。
-
-**产出**：`prune_utils.py`（含 load → prune → save）、`prune_student.py` 流水线、可复现的「Distill-then-Prune」实验（含准确率前后对比）。
+Suggested order: **2 (Distill-then-Prune) first, then 1 (Prune-then-Distill), and finally 3 (joint)**.
 
 ---
 
-### Phase 2：结构化剪枝（Channel Pruning）（约 3–5 天）
+## 3. Phased Implementation Plan
 
-- [x] **2.1** 引入 `torch-pruning`，实现 **channel-level 剪枝**：
-  - 封装 `apply_structured_prune(model, example_inputs, amount, ignored_layers, ...)`；
-  - 对 **MobileNetV2 student** 做 L2-norm channel 剪枝，忽略最终 classifier。
-- [x] **2.2** 做 **Distill-then-Prune** 实验：
-  - 用现有 `train_student` 训练 student；
-  - `prune_student.py` 支持对 student 做不同剪枝率，评估 **参数量、FLOPs、accuracy、inference time**；
-  - 记录到 `checkpoints/pruning_comparison.csv`，便于和 `distill_method_comparison` 对比。
-- [ ] **2.3**（可选）对 **ResNet-34 teacher** 做 channel 剪枝，再蒸馏：
-  - 实现 **Prune-then-Distill**；
-  - 对比「原始 teacher + KD」vs「剪枝 teacher + KD」的 student 精度与训练成本。
+### Phase 1: Environment and Minimal Validation (~1–2 days)
 
-**产出**：结构化剪枝工具函数、Distill-then-Prune 流水线与脚本、`pruning_comparison.csv`。
+- [x] **1.1** Install dependencies
+  - `pip install torch-pruning thop` (optional, for structured pruning and FLOPs);
+  - Phase 1 can also be done with `torch.nn.utils.prune` alone.
+- [x] **1.2** Write a **standalone pruning script** (e.g. `src/prune_utils.py`):
+  - Load an existing checkpoint (teacher or student);
+  - Apply **L1 unstructured** pruning to `nn.Linear` / `nn.Conv2d` (e.g. 30%) with `torch.nn.utils.prune`;
+  - Save the pruned model and run the `evaluate` logic to check the accuracy change.
+- [x] **1.3** Get it working end to end on CIFAR-10: **standard KD student → prune student → evaluate**, and confirm the pipeline works.
 
----
-
-### Phase 3：渐进式剪枝与超参（约 2–3 天）
-
-- [ ] **3.1** **Gradual pruning**：
-  - 在 `train_student` 的每个 epoch 结束时，对 student 的部分层做小幅剪枝（如每 epoch 增加 1% 稀疏度，直到目标）；
-  - 可用 `torch-pruning` 的 scheduler 或自写简单 schedule。
-- [ ] **3.2** 超参数搜索（在小规模设置下）：
-  - 剪枝率、gradual 的 schedule、是否微调、微调 epoch 数；
-  - 记录最佳配置，写入 `configs/config.yaml` 或单独 `configs/pruning.yaml`。
-- [ ] **3.3** 若有时间，尝试 **Prune + Distill 联合**：
-  - 训练 loop 里同时做 KD loss 与渐进剪枝；
-  - 与 Phase 2 的 Distill-then-Prune 对比精度与模型大小。
-
-**产出**：Gradual pruning 实现、超参建议、以及（若完成）联合实验对比。
+**Deliverables**: `prune_utils.py` (load → prune → save), the `prune_student.py` pipeline, and a reproducible Distill-then-Prune experiment (with before/after accuracy).
 
 ---
 
-### Phase 4：复现与文档（约 1–2 天）
+### Phase 2: Structured Pruning (Channel Pruning) (~3–5 days)
 
-- [x] **4.1** 添加 **scripts**：
-  - `run_prune_student.sh`，与现有 `run_distill_methods.sh` 风格统一；
-  - 支持环境变量 `STUDENT_CKPT`、`PRUNE_RATIO`、`PRUNE_METHOD`、`FINETUNE_EPOCHS` 等； CLI 也可直接指定。
-- [ ] **4.2** 更新 **README**：
-  - 如何安装额外依赖、如何运行剪枝实验、如何解读 `results/` 里的表格；
-- [ ] **4.3** 在 `results/` 下写简短 **PRUNING_REPORT.md**：
-  - 剪枝设置、主要结果（参数量、FLOPs、accuracy）、与现有 KD 的对比、结论与后续可做工作。
+- [x] **2.1** Add `torch-pruning` and implement **channel-level pruning**:
+  - Wrap it as `apply_structured_prune(model, example_inputs, amount, ignored_layers, ...)`;
+  - Apply L2-norm channel pruning to the **MobileNetV2 student**, ignoring the final classifier.
+- [x] **2.2** Run the **Distill-then-Prune** experiment:
+  - Train the student with the existing `train_student`;
+  - `prune_student.py` supports different pruning ratios and evaluates **parameter count, FLOPs, accuracy, and inference time**;
+  - Log results to `checkpoints/pruning_comparison.csv` for comparison with `distill_method_comparison`.
+- [ ] **2.3** (Optional) Apply channel pruning to the **ResNet-34 teacher**, then distill:
+  - Implement **Prune-then-Distill**;
+  - Compare student accuracy and training cost for "original teacher + KD" vs "pruned teacher + KD".
 
-**产出**：可复现脚本、README 更新、PRUNING_REPORT.md。
+**Deliverables**: structured pruning utilities, the Distill-then-Prune pipeline and scripts, `pruning_comparison.csv`.
 
 ---
 
-## 四、建议的代码结构
+### Phase 3: Gradual Pruning and Hyperparameters (~2–3 days)
+
+- [ ] **3.1** **Gradual pruning**:
+  - At the end of each epoch in `train_student`, prune some of the student's layers slightly (e.g. +1% sparsity per epoch until the target is reached);
+  - Use a `torch-pruning` scheduler or a simple custom schedule.
+- [ ] **3.2** Hyperparameter search (at small scale):
+  - Pruning ratio, gradual schedule, whether to fine-tune, number of fine-tuning epochs;
+  - Record the best configuration in `configs/config.yaml` or a separate `configs/pruning.yaml`.
+- [ ] **3.3** If time allows, try **joint Prune + Distill**:
+  - Apply the KD loss and progressive pruning together in the training loop;
+  - Compare accuracy and model size against Phase 2's Distill-then-Prune.
+
+**Deliverables**: gradual pruning implementation, recommended hyperparameters, and (if completed) the joint experiment comparison.
+
+---
+
+### Phase 4: Reproducibility and Documentation (~1–2 days)
+
+- [x] **4.1** Add **scripts**:
+  - `run_prune_student.sh`, consistent in style with the existing `run_distill_methods.sh`;
+  - Supports environment variables such as `STUDENT_CKPT`, `PRUNE_RATIO`, `PRUNE_METHOD`, `FINETUNE_EPOCHS`; these can also be passed directly on the CLI.
+- [ ] **4.2** Update the **README**:
+  - How to install the extra dependencies, how to run the pruning experiments, and how to read the tables in `results/`.
+- [ ] **4.3** Write a short **PRUNING_REPORT.md** under `results/`:
+  - Pruning setup, main results (parameter count, FLOPs, accuracy), comparison with the existing KD results, conclusions and future work.
+
+**Deliverables**: reproducible scripts, README update, PRUNING_REPORT.md.
+
+---
+
+## 4. Proposed Code Structure
 
 ```text
 knowledge-distillation/
 ├── configs/
 │   ├── config.yaml
-│   └── pruning.yaml          # 新增：剪枝相关配置
+│   └── pruning.yaml          # New: pruning configuration
 ├── src/
-│   ├── prune_utils.py        # 新增：剪枝工具（unstructured + structured 封装）
-│   ├── train_student.py      # 后续可加 --prune 等逻辑
+│   ├── prune_utils.py        # New: pruning utilities (unstructured + structured wrappers)
+│   ├── train_student.py      # Can later gain --prune and similar options
 │   └── ...
 ├── scripts/
 │   ├── run_prune_student.sh           # Distill-then-Prune
@@ -143,34 +143,34 @@ knowledge-distillation/
 │   └── ...
 ├── results/
 │   ├── distill_method_comparison.csv
-│   ├── pruning_comparison.csv         # 新增：剪枝率 vs 精度/大小
-│   └── PRUNING_REPORT.md              # 新增
+│   ├── pruning_comparison.csv         # New: pruning ratio vs accuracy/size
+│   └── PRUNING_REPORT.md              # New
 └── docs/
-    └── PRUNING_PLAN.md                # 本文件
+    └── PRUNING_PLAN.md                # This file
 ```
 
 ---
 
-## 五、依赖建议
+## 5. Dependencies
 
-当前 `requirements.txt` 基础上，建议新增：
+On top of the current `requirements.txt`, add:
 
 ```text
 # Pruning (optional, for Phase 2+)
 torch-pruning>=1.3.0
 ```
 
-Phase 1 仅用 `torch.nn.utils.prune` 时可不加。
+Not needed if Phase 1 uses only `torch.nn.utils.prune`.
 
 ---
 
-## 六、简要总结
+## 6. Summary
 
-| 阶段 | 内容 | 预期产出 |
+| Phase | Content | Expected Output |
 |------|------|----------|
-| **Phase 1** | 内置 prune、Distill-then-Prune 小实验 | `prune_utils`、流程跑通 |
-| **Phase 2** | 结构化 channel 剪枝、Distill / Prune 两个顺序 | 剪枝率–精度–大小对比 |
-| **Phase 3** | Gradual pruning、联合 Prune+KD、超参 | 更优压缩与配置 |
-| **Phase 4** | 脚本、README、报告 | 可复现与文档 |
+| **Phase 1** | Built-in prune, small Distill-then-Prune experiment | `prune_utils`, working pipeline |
+| **Phase 2** | Structured channel pruning, both Distill/Prune orderings | Pruning ratio vs accuracy vs size comparison |
+| **Phase 3** | Gradual pruning, joint Prune+KD, hyperparameters | Better compression and configurations |
+| **Phase 4** | Scripts, README, report | Reproducibility and documentation |
 
-优先完成 **Phase 1 + Phase 2**，即可得到一批有参考价值的剪枝+KD 结果；Phase 3–4 视时间再推进。若你愿意，我可以从 Phase 1 的 `prune_utils.py` 和 `run_prune_student` 的具体接口设计开始，按你当前仓库结构一步步实现。
+Prioritize **Phase 1 + Phase 2**, which already produce a useful set of pruning + KD results; Phases 3–4 can follow as time permits.
