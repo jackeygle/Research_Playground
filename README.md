@@ -30,6 +30,5 @@ Research on sequence-to-sequence modeling for long-term time series or trajector
 
 ## Technical Stack
 - **Deep Learning**: PyTorch, Hugging Face, TensorFlow
-- **Robotics**: Isaac Sim, ManiSkill
 - **Compute**: Slurm Cluster (A100/V100/H100 optimization)
 - **DevOps**: Docker, CI/CD pipelines
